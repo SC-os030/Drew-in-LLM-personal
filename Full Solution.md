@@ -35,16 +35,11 @@ Stable Diffusion XL（SDXL）是Stability AI推出的高性能文生图扩散模
 3.1.3.典型工作流程
 from diffusers import StableDiffusionXLPipeline
 import torch
-
 pipe = StableDiffusionXLPipeline.from_pretrained(
     "stabilityai/stable-diffusion-xl-base-1.0",
     torch_dtype=torch.float16
 ).to("cuda")
-
-# Base生成
 image = pipe(prompt="cyberpunk cityscape").images[0]
-
-# Refiner精修
 refiner = StableDiffusionXLImg2ImgPipeline.from_pretrained(
     "stabilityai/stable-diffusion-xl-refiner-1.0",
     torch_dtype=torch.float16
