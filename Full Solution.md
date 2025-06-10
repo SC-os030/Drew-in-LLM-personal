@@ -22,6 +22,7 @@ graph TD
 4. **多次尝试与择优 (Multiple Attempts & Selection):** 由于生成模型的随机性，单次生成可能不是最优的。我们对每个prompt进行多次（例如3-5次）独立的“生成-转换”尝试。在您的代码中，选择最佳SVG的依据是`evaluate_with_competition_metric`函数返回的`combined_score`。鉴于提供的`VQAEvaluator`是一个返回0的占位符，实际的优化目标主要落在了**美学分数 (Aesthetic Score)** 上。
 5. **SVG后处理 (SVG Post-processing):** 在选出最佳SVG后，我们进行了一个细微的修改：通过`modify_svg`函数在SVG的右下角添加了一个固定的“T”字形图案。这样可以利用OCR评估中的“4个免费字符”缓冲，确保在某些情况下图像中存在少量可识别字符，避免潜在的极端惩罚或零分情况，同时这个小标记本身几乎不影响主要视觉内容和美学。
 6. **合规性与约束满足:** 在整个SVG生成过程中，特别是`bitmap_to_svg_layered`函数内部，我们严格监控并控制SVG的文件大小 (如`max_size_bytes=9800`)，并确保生成的SVG元素在允许列表内（尽管代码中未显式列出允许列表，但生成的`polygon`元素是SVG基本且常用的）。
+
 三、核心模块讲解
 **3.1.1模型选择**：针对本项目，选择Stable Diffusion XL (SDXL) 作为基模型，接下来对SDXL模型进行详解
 Stable Diffusion XL（SDXL）是Stability AI推出的高性能文生图扩散模型，属于Stable Diffusion系列的重要升级版本
