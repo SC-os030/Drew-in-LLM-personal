@@ -24,6 +24,7 @@ graph TD
 6. **合规性与约束满足:** 在整个SVG生成过程中，特别是`bitmap_to_svg_layered`函数内部，我们严格监控并控制SVG的文件大小 (如`max_size_bytes=9800`)，并确保生成的SVG元素在允许列表内（尽管代码中未显式列出允许列表，但生成的`polygon`元素是SVG基本且常用的）。
 
 三、核心模块讲解
+
 **3.1.1模型选择**：针对本项目，选择Stable Diffusion XL (SDXL) 作为基模型，接下来对SDXL模型进行详解
 Stable Diffusion XL（SDXL）是Stability AI推出的高性能文生图扩散模型，属于Stable Diffusion系列的重要升级版本
    a.双模型协作架构
@@ -32,7 +33,9 @@ Stable Diffusion XL（SDXL）是Stability AI推出的高性能文生图扩散模
      Base模型35亿参数 + Refiner模型66亿参数，总参数量达Stable Diffusion 2.1的8倍
    c.创新编码器设计
      双CLIP模型集成：OpenCLIP ViT-bigG（2560维嵌入），CLIP ViT-L（768维嵌入），文本编码维度扩展至3328维
+
 **3.1.2.关键技术改进**：a.训练数据优化 b.扩散过程创新 c.条件控制增强
+
 **3.1.3.典型工作流程**
 from diffusers import StableDiffusionXLPipeline
 import torch
