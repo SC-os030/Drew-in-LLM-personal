@@ -1,0 +1,604 @@
+svg_constraints = kagglehub.package_import('metric/svg-constraints') # 从Kaggle Hub导入'metri
+class VQAEvaluator: # 定义一个名为VQAEvaluator的类。
+    """Evaluates images based on their similarity to a given text description.""" # 根据图像与给定文本描述的相似性来评估图像。
+
+    def __init__(self): # 定义类的构造函数。
+        pass # 构造函数目前不执行任何特定的初始化操作。
+
+    def score(self, image: Image.Image, description: str) -> float: # 定义一个名为score的方法。
+        # 参数: image (PIL.Image.Image类型): 输入的图像。
+        # 参数: description (str类型): 输入的文本描述。
+        # 返回值: float类型: 评估分数。
+        return 0 # 当前score方法返回固定的0分，可能是一个占位符或基线实现。
+
+
+class AestheticPredictor(nn.Module): # 定义一个名为AestheticPredictor的类，继承自torch.nn.Module，表明它是一个PyTorch模型。
+    def __init__(self, input_size): # 定义类的构造函数。
+        # 参数: input_size: 模型输入的特征维度。
+        super().__init__() # 调用父类nn.Module的构造函数。
+        self.input_size = input_size # 将传入的input_size赋值给实例变量self.input_size。
+        self.layers = nn.Sequential( # 定义一个序列化的神经网络层容器。
+            nn.Linear(self.input_size, 1024), # 第一个全连接层，输入维度为self.input_size，输出维度为1024。
+            nn.Dropout(0.2), # Dropout层，以0.2的概率随机失活神经元，用于防止过拟合。
+            nn.Linear(1024, 128), # 第二个全连接层，输入1024，输出128。
+            nn.Dropout(0.2), # Dropout层，概率0.2。
+            nn.Linear(128, 64), # 第三个全连接层，输入128，输出64。
+            nn.Dropout(0.1), # Dropout层，概率0.1。
+            nn.Linear(64, 16), # 第四个全连接层，输入64，输出16。
+            nn.Linear(16, 1), # 第五个全连接层，输入16，输出1（通常用于回归任务的输出）。
+        )
+
+    def forward(self, x): # 定义模型的前向传播函数。
+        # 参数: x: 输入的张量。
+        return self.layers(x) # 将输入x通过定义的layers序列，并返回输出。
+
+class AestheticEvaluator:
+    def __init__(self):
+        # 使用kagglehub下载美学评分模型。
+        self.model_path = kagglehub.notebook_output_download(
+            'metric/sac-logos-ava1-l14-linearmse'
+        ) + '/sac+logos+ava1-l14-linearMSE.pth'
+        
+        # 使用kagglehub下载CLIP模型。
+        self.clip_model_path = kagglehub.notebook_output_download(
+            'metric/openai-clip-vit-large-patch14'
+        ) + '/ViT-L-14.pt'
+
+        self.predictor, self.clip_model, self.preprocessor = self.load() # 调用load方法加载模型和预处理器，并将返回结果赋值给实例变量。
+
+    def load(self):
+        """Loads the aesthetic predictor model and CLIP model."""
+        state_dict = torch.load(self.model_path, weights_only=True, map_location='cuda:1') # 加载美学预测器模型的权重，weights_only=True表示只加载权重
+
+        # CLIP embedding dim is 768 for CLIP ViT L 14
+        predictor = AestheticPredictor(768) # 初始化AestheticPredictor模型，输入维度为768。
+        predictor.load_state_dict(state_dict) # 将加载的权重加载到模型中。
+        predictor.to('cuda:1') # 将模型移动到'cuda:1'设备（第一个GPU）。
+        predictor.eval() # 将模型设置为评估模式，这会关闭Dropout等训练特有的层。
+        clip_model, preprocessor = clip.load(self.clip_model_path, device='cuda:1') # 使用clip库的load函数加载CLIP模型及其预处理器，指定加载到'cuda:1'设备。
+
+        return predictor, clip_model, preprocessor # 返回加载的美学预测器、CLIP模型和预处理器。
+
+
+    def score(self, image: Image.Image) -> float: # 定义score方法，用于计算图像的美学分数。
+        # 参数: image (PIL.Image.Image类型): 输入的PIL图像。
+        # 返回值: float类型: 计算得到的美学分数。
+        image = self.preprocessor(image).unsqueeze(0).to('cuda:1') # 使用预处理器对图像进行预处理，unsqueeze(0)在第0维增加一个维度（batch维度），然后将图像张量移动到'cuda:1'设备。
+
+        with torch.no_grad(): # 使用torch.no_grad()上下文管理器，禁用梯度计算，这在推理时可以节省内存并加速计算。
+            image_features = self.clip_model.encode_image(image) # 使用CLIP模型提取图像特征。
+            # l2归一化。
+            image_features /= image_features.norm(dim=-1, keepdim=True) # 对图像特征进行L2归一化，dim=-1表示沿最后一个维度计算范数，keepdim=True保持维度不变。
+            image_features = image_features.cpu().detach().numpy() # 将特征张量移动到CPU，分离计算图（detach），并转换为NumPy数组。
+
+        score = self.predictor(torch.from_numpy(image_features).to('cuda:1').float()) # 将NumPy特征数组转换回PyTorch张量，移动到'cuda:1'设备，转换为浮点类型，然后输入到美学预测器中得到分数。
+
+        return score.item() / 10.0  # scale to [0, 1] # 从分数张量中获取Python标量值 (.item())，然后除以10.0将其缩放到[0, 1]范围。
+
+
+def harmonic_mean(a: float, b: float, beta: float = 1.0) -> float:
+    '''
+    计算两个值的调和平均数，使用beta参数进行加权。
+    
+    参数：
+        a：第一个值（例如，精确率）
+        b：第二个值（例如，召回率）
+        beta：加权参数
+    
+    返回：
+        加权的调和平均数
+    处理零值以防止除以零。
+    '''
+    if a <= 0 or b <= 0: # 检查输入值a或b是否小于等于0。
+        return 0.0 # 如果任一值为非正数，则返回0.0，避免除以零的错误。
+    return (1 + beta**2) * (a * b) / (beta**2 * a + b) # 计算并返回加权调和平均数。
+
+
+def svg_to_png(svg_code: str, size: tuple = (384, 384)) -> Image.Image:
+    """
+    使用CairoSVG将SVG字符串转换为PNG图像。
+    
+    如果SVG没有定义`viewBox`，它将使用提供的尺寸添加一个。
+    
+    参数
+    ----------
+    svg_code : str
+        要转换的SVG字符串。
+    size : tuple[int, int], 默认=(384, 384)
+        输出PNG图像的期望尺寸（宽度，高度）。
+    
+    返回
+    -------
+    PIL.Image.Image
+        生成的PNG图像。
+    """
+    # Ensure SVG has proper size attributes
+    if 'viewBox' not in svg_code:
+        svg_code = svg_code.replace('<svg', f'<svg viewBox="0 0 {size[0]} {size[1]}"')
+
+    # Convert SVG to PNG
+    png_data = cairosvg.svg2png(bytestring=svg_code.encode('utf-8'))
+    return Image.open(io.BytesIO(png_data)).convert('RGB').resize(size)
+
+
+class ImageProcessor:
+    def __init__(self, image: Image.Image, seed=None):
+        """初始化，接受图像路径或PIL图像对象。"""
+        self.image = image
+        self.original_image = self.image.copy()  # 保存原始图像
+        if seed is not None:
+            self.rng = np.random.RandomState(seed)  # 设置随机种子
+        else:
+            self.rng = np.random  # 默认使用随机状态
+
+    def reset(self):
+        self.image = self.original_image.copy()  # 重置图像为原始图像
+        return self
+    
+
+    def apply_median_filter(self, size=3):
+        """应用中值滤波器，去噪, 去除离群像素值。
+
+        参数:
+            size: 中值滤波窗口的大小。
+        """
+        self.image = self.image.filter(ImageFilter.MedianFilter(size=size))  # 使用PIL中的中值滤波器
+        return self
+
+    def apply_bilateral_filter(self, d=9, sigma_color=75, sigma_space=75):
+        """应用双边滤波器，平滑图像同时保留边缘。
+
+        参数:
+            d: 每个像素邻域的直径
+            sigma_color: 颜色空间中的滤波sigma值
+            sigma_space: 坐标空间中的滤波sigma值
+        """
+        # 将PIL图像转换为numpy数组用于OpenCV
+        img_array = np.asarray(self.image)
+
+        # 应用双边滤波
+        filtered = cv2.bilateralFilter(img_array, d, sigma_color, sigma_space)
+
+        # 转回PIL图像
+        self.image = Image.fromarray(filtered)
+        return self
+
+    def apply_fft_low_pass(self, cutoff_frequency=0.5):
+        """应用频域中的低通滤波器（使用FFT）。
+
+        参数:
+            cutoff_frequency: 截止频率的归一化值（0-1）。
+                值越低，去除的高频成分越多。
+        """
+        # 转换为numpy数组，确保使用float32进行FFT
+        img_array = np.array(self.image, dtype=np.float32)
+
+        # 分别处理每个颜色通道
+        result = np.zeros_like(img_array)
+        for i in range(3): # RGB三个通道
+            # 应用FFT
+            f = np.fft.fft2(img_array[:, :, i]) # f 不再是像素亮度值，而是该层中存在的各种频率的表示。
+            
+            # fft2 的原始输出会把低频（平滑部分）放在频率网格的角落，高频放在中间附近，这不太方便操作。
+            # fftshift 会重新排列这个网格，使得低频位于中心，高频分布在边缘。
+            fshift = np.fft.fftshift(f)
+
+            # 创建低通滤波器掩模
+            rows, cols = img_array[:, :, i].shape
+            crow, ccol = rows // 2, cols // 2
+            mask = np.zeros((rows, cols), np.float32) # mask 会决定哪些频率成分需要被保留，哪些需要被去除。
+
+            # r 是mask的半径，决定了保留多少低频成分;
+            # cutoff_frequency 控制了保留的频率范围，越小的值意味着去除更多的高频成分。
+            r = int(min(crow, ccol) * cutoff_frequency)  
+
+            # 用数学方式定义了一个位于网格中心、半径为 r 的圆。
+            # mask_area 对于圆内的点是 True，圆外的点是 False。
+            center = [crow, ccol]
+            x, y = np.ogrid[:rows, :cols]
+            mask_area = (x - center[0]) ** 2 + (y - center[1]) ** 2 <= r * r
+            mask[mask_area] = 1 # 在我们之前创建的黑色“滤波模板” (mask) 上，将圆圈内部的区域变成白色（数值为 1）
+
+            # 应用掩模并进行逆FFT
+            fshift_filtered = fshift * mask # 在模板是白色 (1) 的地方，原始频率值被保留。在模板是黑色 (0) 的地方，频率值变为 0（被擦除）。
+            f_ishift = np.fft.ifftshift(fshift_filtered) # 将频域的低频部分移回原来位置
+            img_back = np.fft.ifft2(f_ishift) # 逆傅里叶变换，将频域的数据转换回空间域
+            img_back = np.real(img_back) # 提取图像的实部，因为傅里叶变换通常会产生复数结果，但我们只关心实数部分。
+
+            result[:, :, i] = img_back # 更新图像并返回
+
+        # 限制值范围到0-255，并转换为uint8
+        result = np.clip(result, 0, 255).astype(np.uint8)
+
+        # 转回PIL图像
+        self.image = Image.fromarray(result)
+        return self
+
+    def apply_jpeg_compression(self, quality=85):
+        """应用JPEG压缩。
+
+        参数:
+            quality: JPEG压缩质量（0-95）。值越低，压缩越强。
+        """
+        buffer = io.BytesIO()
+        self.image.save(buffer, format='JPEG', quality=quality)  # 保存为JPEG格式
+        buffer.seek(0)
+        self.image = Image.open(buffer)  # 打开JPEG压缩后的图像
+        return self
+
+    def apply_random_crop_resize(self, crop_percent=0.05):
+        """随机裁剪并调整大小回原始尺寸。
+
+        参数:
+            crop_percent: 要裁剪的图像百分比（0-0.4）。
+        """
+        width, height = self.image.size
+        crop_pixels_w = int(width * crop_percent)
+        crop_pixels_h = int(height * crop_percent)
+
+        left = self.rng.randint(0, crop_pixels_w + 1)
+        top = self.rng.randint(0, crop_pixels_h + 1)
+        right = width - self.rng.randint(0, crop_pixels_w + 1)
+        bottom = height - self.rng.randint(0, crop_pixels_h + 1)
+
+        self.image = self.image.crop((left, top, right, bottom))  # 裁剪图像
+        self.image = self.image.resize((width, height), Image.BILINEAR)  # 调整回原始尺寸
+        return self
+
+    def apply(self):
+        """应用一系列处理防御措施。"""
+        return (
+            self.apply_random_crop_resize(crop_percent=0.03)
+            .apply_jpeg_compression(quality=95)
+            .apply_median_filter(size=9)
+            .apply_fft_low_pass(cutoff_frequency=0.5)
+            .apply_bilateral_filter(d=5, sigma_color=75, sigma_space=75)
+            .apply_jpeg_compression(quality=92)
+        )
+
+
+
+#模型加载
+device = "cuda:1" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
+import torch
+from safetensors.torch import load_file
+from diffusers import DiffusionPipeline, DDIMScheduler, StableDiffusionXLPipeline,UNet2DConditionModel, EulerDiscreteScheduler
+from diffusers.loaders import LoraLoaderMixin
+
+
+base = kagglehub.model_download('stabilityai/stable-diffusion-xl/PyTorch/base-1-0/1') # 从Kaggle Hub下载稳定扩散XL基础模型的路径。
+unet_state = kagglehub.model_download('arnavkohli2005/sdxl-lightning/PyTorch/sdxl_lightning_4step_unet/1') # 从Kaggle Hub下载SDXL Lightning 4步UNet权重的路径。
+scheduler = EulerDiscreteScheduler.from_pretrained(base, subfolder="scheduler") # 从基础模型路径加载EulerDiscreteScheduler的配置。
+print("Scheduler loaded successfully!") # 打印调度器加载成功的消息。
+print(scheduler.config) # 打印调度器的配置信息。
+
+doctor_diffusion_vector_path = kagglehub.model_download('crischir/doctor-diffusions-controllable-vector/Other/default/2') # 从Kaggle Hub下载'doctor-diffusions-controllable-vector'模型的路径。
+
+unet_config = UNet2DConditionModel.load_config( # 加载UNet模型的配置。
+    base, # 从基础模型路径加载。
+    subfolder="unet" # 指定子文件夹为"unet"。
+)
+unet = UNet2DConditionModel.from_config(unet_config).to(device, torch.float16) # 根据配置创建UNet模型实例，并将其移动到指定设备，数据类型设置为半精度浮点型(torch.float16)。
+state_dict = load_file(unet_state+'/sdxl_lightning_4step_unet.safetensors', device="cpu")  # 从下载的路径加载UNet权重文件(.safetensors)，首先加载到CPU。
+unet.load_state_dict(state_dict) # 将加载的权重加载到UNet模型中。
+#https://civitai.com/models/156859?modelVersionId=234474
+#https://www.kaggle.com/models/architkohli/doctor-diffusion-vector-sdxl
+
+# 初始化基础的稳定扩散XL Pipeline。
+pipe = StableDiffusionXLPipeline.from_pretrained( # 从预训练模型初始化StableDiffusionXLPipeline。
+    base, # 基础模型路径。
+    unet=unet, # 使用上面加载和配置的UNet模型。
+    scheduler=scheduler, # 使用上面加载的调度器。
+    torch_dtype=torch.float16,  # 使用半精度浮点型(torch.float16)以优化性能和显存。
+    use_safetensors=True, # 使用safetensors格式加载权重。
+    variant="fp16", # 指定加载fp16变体的模型。
+    safety_checker=None # 禁用安全检查器以提高速度（请谨慎使用）。
+)
+#| export
+# 将Pipeline移动到指定设备（通常是CUDA）。
+pipe.to(device) # 将整个Pipeline移动到之前确定的设备（GPU或CPU）。
+pipe.load_lora_weights(doctor_diffusion_vector_path,weight_name='DD-vector-v2.safetensors') # 加载LoRA权重，从指定的路径和文件名加载。
+
+
+
+Image - > SVG
+# 为什么是17？一个3位的十六进制颜色#RGB是#RRGGBB的简写，其中RR是R的重复，GG是G的重复，BB是B的重复。
+# 在十六进制中，每个数字代表一个从0到15的值。当你重复一个十六进制数字时，你实际上是将其值乘以16再加上它自身。
+# 例如，如果R是A（十进制为10），RR就变成AA，即(10×16)+10=170（十进制）。注意到170=10×17。
+# 通常，如果一个单位十六进制数字的十进制值为x（0-15），那么两位重复xx的十进制值为(x×16)+x=17x。
+# 因此，一个6位的十六进制颜色#RRGGBB能够被压缩为#RGB，当且仅当RR、GG和BB的十进制值都是17的倍数时。
+# 这意味着（当解释为单位十六进制数字时）R、G和B的十进制值是原始2位十六进制值除以17的结果。
+def compress_hex_color(hex_color):
+    """旨在将标准的6位十六进制颜色代码（如#RRGGBB）尽可能缩短为其3位等效形式（如#RGB）。"""
+    r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+    if r % 17 == 0 and g % 17 == 0 and b % 17 == 0:
+        return f'#{r//17:x}{g//17:x}{b//17:x}'
+    return hex_color
+
+def extract_features_by_scale(img_np, num_colors=16):
+    """
+    按比例分层提取图像特征
+    
+    参数：
+        img_np (np.ndarray): 输入图像
+        num_colors (int): 用于量化的颜色数量
+    
+    返回：
+        list: 按重要性排序的分层特征
+    如果需要，则转换为RGB。
+    """
+    if len(img_np.shape) == 3 and img_np.shape[2] > 1: # 检查图像数组是否为3维且第三维（通道数）大于1（即彩色图像）。
+        img_rgb = img_np # 如果是彩色图像，则直接使用。
+    else: # 如果不是（例如灰度图或单通道图）。
+        img_rgb = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB) # 将图像从灰度转换为RGB格式。
+    
+    # 转换为灰度图以便处理。
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY) # 将RGB图像转换为灰度图像。
+    height, width = gray.shape # 获取灰度图像的高度和宽度。
+    
+    # 执行颜色量化。
+    pixels = img_rgb.reshape(-1, 3).astype(np.float32) # 将RGB图像的像素数据重塑为(N, 3)的二维数组，其中N是像素总数，3是RGB通道，数据类型转换为float32。
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2) # 定义K-Means算法的终止标准：当达到最大迭代次数(100)或精度(0.2)时停止。
+    _, labels, centers = cv2.kmeans(pixels, num_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS) # 使用K-Means算法对像素进行聚类，得到每个像素的标签和聚类中心（即量化后的颜色）。
+    # _ : 紧密度，这里未使用。
+    # labels : 每个像素所属的类别标签。
+    # centers : 聚类中心的颜色值。
+    
+    # 量化后的图像。
+    palette = centers.astype(np.uint8) # 将聚类中心的颜色值（浮点型）转换为uint8类型，形成调色板。
+    quantized = palette[labels.flatten()].reshape(img_rgb.shape) # 根据每个像素的标签从调色板中获取对应的颜色，然后重塑为原始图像的形状，得到颜色量化后的图像。
+    
+    # 分层特征提取。
+    hierarchical_features = [] # 初始化一个空列表，用于存储提取到的分层特征。
+    
+    # 按频率对颜色进行排序。
+    unique_labels, counts = np.unique(labels, return_counts=True) # 获取唯一的像素标签及其对应的数量（频率）。
+    sorted_indices = np.argsort(-counts) # 根据颜色频率降序排序，得到排序后的索引。
+    sorted_colors = [palette[i] for i in sorted_indices] # 根据排序后的索引从调色板中获取排序后的颜色。
+    
+    # 用于重要性计算的中心点。
+    center_x, center_y = width/2, height/2 # 计算图像的中心点坐标。
+    
+    for color in sorted_colors: # 遍历按频率排序后的每种颜色。
+        # 创建颜色mask
+        color_mask = cv2.inRange(quantized, color, color) # 在量化图像中创建当前颜色的掩模，该颜色对应的像素值为255，其他为0。
+        
+        # 查找轮廓。
+        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) # 在颜色掩模上查找外部轮廓，并使用简化的轮廓点。
+        
+        # 按面积对轮廓进行排序（最大的在前）。
+        contours = sorted(contours, key=cv2.contourArea, reverse=True) # 将找到的轮廓按其面积降序排序。
+        
+        # 将RGB转换为压缩的十六进制。
+        hex_color = compress_hex_color(f'#{color[0]:02x}{color[1]:02x}{color[2]:02x}') # 将当前颜色（RGB格式）转换为十六进制字符串，并尝试压缩。
+        
+        color_features = [] # 初始化一个空列表，用于存储当前颜色的特征。
+        for contour in contours: # 遍历当前颜色的每个轮廓。
+            # 跳过微小的轮廓。
+            area = cv2.contourArea(contour) # 计算轮廓的面积。
+            if area < 20: # 如果轮廓面积小于20像素。
+                continue # 则跳过该轮廓。
+            
+            # 计算轮廓中心。
+            m = cv2.moments(contour) # 计算轮廓的矩。
+            if m["m00"] == 0: # 如果轮廓的零阶矩（面积）为0。
+                continue # 则跳过该轮廓，以避免除以零的错误。
+            
+            cx = int(m["m10"] / m["m00"]) # 计算轮廓中心的x坐标。
+            cy = int(m["m01"] / m["m00"]) # 计算轮廓中心的y坐标。
+            
+            # 与图像中心的距离（归一化）。
+            dist_from_center = np.sqrt(((cx - center_x) / width)**2 + ((cy - center_y) / height)**2) # 计算轮廓中心到图像中心的归一化距离。
+            
+            # 简化轮廓。
+            epsilon = 0.02 * cv2.arcLength(contour, True) # 计算用于轮廓逼近的epsilon值，它是轮廓周长的2%。
+            approx = cv2.approxPolyDP(contour, epsilon, True) # 使用Douglas-Peucker算法简化轮廓。
+            
+            # 生成点字符串。
+            points = " ".join([f"{pt[0][0]:.1f},{pt[0][1]:.1f}" for pt in approx]) # 将简化后轮廓的每个点的坐标格式化为"x.x,y.y"的形式，并用空格连接成字符串。
+            
+            # 计算重要性（面积、与中心的接近程度、复杂度）。
+            importance = ( # 计算特征的重要性分数。
+                area * # 面积越大，重要性越高。
+                (1 - dist_from_center) * # 越接近图像中心，重要性越高。
+                (1 / (len(approx) + 1)) # 轮廓点越少（复杂度越低），重要性越高（这里似乎是反的，点越多复杂度越高，分母越大，这个因子越小）。
+            )
+            
+            color_features.append({ # 将提取的特征信息存入字典。
+                'points': points, # 轮廓点字符串。
+                'color': hex_color, # 颜色（十六进制）。
+                'area': area, # 面积。
+                'importance': importance, # 重要性分数。
+                'point_count': len(approx), # 轮廓点的数量。
+                'original_contour': approx  # Store original contour for adaptive simplification # 存储原始轮廓点，用于自适应简化。
+            })
+        
+        # 在此颜色内按重要性对特征进行排序。
+        color_features.sort(key=lambda x: x['importance'], reverse=True) # 将当前颜色的特征按重要性降序排序。
+        hierarchical_features.extend(color_features) # 将当前颜色排序后的特征添加到总的特征列表中。
+    
+    # 按总体重要性进行最终排序。
+    hierarchical_features.sort(key=lambda x: x['importance'], reverse=True) # 将所有提取到的特征按重要性降序排序。
+    
+    return hierarchical_features # 返回排序后的分层特征列表。
+
+
+def simplify_polygon(points_str, simplification_level): # 定义一个函数，用于简化多边形。
+    """
+    通过降低坐标精度或点数来简化多边形
+    
+    参数：
+        points_str (str): 空格分隔的 "x,y" 坐标
+        simplification_level (int): 简化级别 (0-3)
+    
+    返回：
+        str: 简化后的点字符串
+    """
+    if simplification_level == 0: # 如果简化级别为0。
+        return points_str # 则不进行简化，直接返回原始点字符串。
+    
+    points = points_str.split() # 将输入的点字符串按空格分割成点列表。
+    
+    # 级别1：四舍五入到1位小数。
+    if simplification_level == 1: # 如果简化级别为1。
+        return " ".join([f"{float(p.split(',')[0]):.1f},{float(p.split(',')[1]):.1f}" for p in points]) # 将每个点的x,y坐标转换为浮点数，四舍五入到一位小数，然后重新格式化并用空格连接。
+    
+    # 级别2：四舍五入到整数。
+    if simplification_level == 2: # 如果简化级别为2。
+        return " ".join([f"{float(p.split(',')[0]):.0f},{float(p.split(',')[1]):.0f}" for p in points]) # 将每个点的x,y坐标转换为浮点数，四舍五入到整数，然后重新格式化并用空格连接。
+    
+    # 级别3：减少点数（保留每隔一个点，但确保至少3个点）。
+    if simplification_level == 3: # 如果简化级别为3。
+        if len(points) <= 4: # 如果点的数量小于等于4。
+            # 如果点数少于或等于4个，则仅四舍五入到整数。
+            return " ".join([f"{float(p.split(',')[0]):.0f},{float(p.split(',')[1]):.0f}" for p in points]) # 则仅将坐标四舍五入到整数。
+        else: # 如果点的数量大于4。
+            # 保留大约一半的点，但至少保留3个。
+            step = min(2, len(points) // 3) # 计算步长，取2和点数除以3的较小值，确保至少保留1/3的点，且步长至少为1（如果min第一个参数是1的话，这里是2）。
+            reduced_points = [points[i] for i in range(0, len(points), step)] # 按计算的步长选取点。
+            # 确保我们至少保留3个点和最后一个点。
+            if len(reduced_points) < 3: # 如果简化后的点数少于3个。
+                reduced_points = points[:3] # 则取原始点的前3个。
+            if points[-1] not in reduced_points: # 如果原始的最后一个点不在简化后的点列表中。
+                reduced_points.append(points[-1]) # 则添加最后一个点，以保持多边形的闭合性或形状。
+            return " ".join([f"{float(p.split(',')[0]):.0f},{float(p.split(',')[1]):.0f}" for p in reduced_points]) # 将简化后的点坐标四舍五入到整数并格式化。
+    
+    return points_str # 如果简化级别不是0-3，则返回原始点字符串。
+
+def bitmap_to_svg_layered(image, max_size_bytes=10000, resize=True, target_size=(384, 384), # 定义一个函数，将位图转换为分层的SVG。
+                          adaptive_fill=True, num_colors=None): # 函数参数定义。
+    """
+    使用分层特征提取和优化的空间使用将位图转换为SVG
+    
+    参数：
+        image: 输入图像 (PIL.Image)
+        max_size_bytes (int): 最大SVG大小
+        resize (bool): 是否在处理前调整图像大小
+        target_size (tuple): 调整大小的目标尺寸 (宽度, 高度)
+        adaptive_fill (bool): 是否自适应填充可用空间
+        num_colors (int): 用于量化的颜色数量，如果为None则自适应选择
+    
+    返回：
+        str: SVG表示的字符串。
+    """
+
+    # 基于图像复杂度的自适应颜色选择。
+    if num_colors is None: # 如果未指定颜色数量。
+        # 简单启发式：复杂图像使用更多颜色。
+        if resize: # 如果需要调整大小。
+            pixel_count = target_size[0] * target_size[1] # 使用目标尺寸计算像素总数。
+        else: # 如果不需要调整大小。
+            pixel_count = image.size[0] * image.size[1] # 使用原始图像尺寸计算像素总数。
+        
+        if pixel_count < 65536:  # 256x256 # 如果像素总数小于256x256。
+            num_colors = 8 # 设置颜色数量为8。
+        elif pixel_count < 262144:  # 512x512 # 如果像素总数小于512x512。
+            num_colors = 12 # 设置颜色数量为12。
+        else: # 如果像素总数更大。
+            num_colors = 16 # 设置颜色数量为16。
+    
+    # 如果请求，则调整图像大小。
+    if resize: # 如果resize参数为True。
+        original_size = image.size # 保存原始图像尺寸。
+        image = image.resize(target_size, Image.LANCZOS) # 使用LANCZOS滤波器将图像调整到目标尺寸。
+    else: # 如果不调整大小。
+        original_size = image.size # 原始尺寸即当前图像尺寸。
+    
+    # 转换为numpy数组。
+    img_np = np.array(image) # 将PIL图像对象转换为NumPy数组。
+    
+    # 获取图像尺寸。
+    height, width = img_np.shape[:2] # 获取（可能调整大小后的）图像的高度和宽度。
+    
+    # 计算平均背景颜色。
+    if len(img_np.shape) == 3 and img_np.shape[2] == 3: # 检查图像是否为三通道彩色图像。
+        avg_bg_color = np.mean(img_np, axis=(0,1)).astype(int) # 计算图像所有像素的平均RGB值作为背景色。
+        bg_hex_color = compress_hex_color(f'#{avg_bg_color[0]:02x}{avg_bg_color[1]:02x}{avg_bg_color[2]:02x}') # 将平均背景色转换为压缩的十六进制格式。
+    else: # 如果不是三通道彩色图像（例如灰度图）。
+        bg_hex_color = '#fff' # 默认背景色设置为白色。
+    
+    # 开始构建SVG。
+    # 在viewBox中使用原始尺寸以便显示时正确缩放。
+    orig_width, orig_height = original_size # 获取原始图像的宽度和高度。
+    svg_header = f'<svg xmlns="http://www.w3.org/2000/svg" width="{orig_width}" height="{orig_height}" viewBox="0 0 {width} {height}">\n' # 构建SVG头部，width和height使用原始尺寸，viewBox使用处理后的图像尺寸。
+    svg_bg = f'<rect width="{width}" height="{height}" fill="{bg_hex_color}"/>\n' # 创建一个覆盖整个viewBox的矩形作为背景，填充计算出的背景色。
+    svg_base = svg_header + svg_bg # SVG的基本结构（头部+背景）。
+    svg_footer = '</svg>' # SVG的尾部。
+    
+    # 计算基本大小。
+    base_size = len((svg_base + svg_footer).encode('utf-8')) # 计算SVG基本结构（不含具体图形元素）的UTF-8编码字节数。
+    available_bytes = max_size_bytes - base_size # 计算可用于添加图形元素的剩余字节数。
+    
+    # 提取分层特征。
+    features = extract_features_by_scale(img_np, num_colors=num_colors) # 调用之前定义的函数提取图像特征。
+    
+    # 如果不使用自适应填充，则一直添加特征直到达到限制。
+    if not adaptive_fill: # 如果不使用自适应填充。
+        svg = svg_base # SVG内容初始化为基本结构。
+        for feature in features: # 遍历提取到的特征。
+            # 尝试添加特征。
+            feature_svg = f'<polygon points="{feature["points"]}" fill="{feature["color"]}" />\n' # 将特征转换为SVG多边形元素字符串。
+            
+            # 检查添加此特征是否超出大小限制。
+            if len((svg + feature_svg + svg_footer).encode('utf-8')) > max_size_bytes: # 检查如果添加当前特征，SVG的总大小是否会超过限制。
+                break # 如果超过限制，则停止添加特征。
+            
+            # 添加特征。
+            svg += feature_svg # 将特征的SVG字符串添加到总的SVG内容中。
+        
+        # 关闭SVG。
+        svg += svg_footer # 添加SVG尾部。
+        return svg # 返回构建的SVG字符串。
+    
+    # 对于自适应填充，（原注释提到二分搜索，但实际代码是）采用两遍法来确定如何添加和简化特征。
+    
+    # 首次尝试：计算所有特征在不同简化级别下的大小。
+    feature_sizes = [] # 初始化列表，用于存储每个特征在不同简化级别下的SVG元素大小。
+    for feature in features: # 遍历所有提取的特征。
+        feature_sizes.append({ # 为每个特征计算并存储其在0到3级简化下的SVG多边形字符串的字节长度。
+            'original': len(f'<polygon points="{feature["points"]}" fill="{feature["color"]}" />\n'.encode('utf-8')), # 原始（0级简化）大小。
+            'level1': len(f'<polygon points="{simplify_polygon(feature["points"], 1)}" fill="{feature["color"]}" />\n'.encode('utf-8')), # 1级简化大小。
+            'level2': len(f'<polygon points="{simplify_polygon(feature["points"], 2)}" fill="{feature["color"]}" />\n'.encode('utf-8')), # 2级简化大小。
+            'level3': len(f'<polygon points="{simplify_polygon(feature["points"], 3)}" fill="{feature["color"]}" />\n'.encode('utf-8')) # 3级简化大小。
+        })
+    
+    # 两遍法：首先添加最重要的特征，然后填充剩余空间。
+    svg = svg_base # SVG内容初始化为基本结构。
+    bytes_used = base_size # 已用字节数初始化为基本SVG结构的大小。
+    added_features = set() # 初始化一个集合，用于跟踪已添加特征的索引。
+    
+    # 第一遍：以原始质量添加最重要的特征。
+    for i, feature in enumerate(features): # 遍历特征列表（已按重要性排序）。
+        feature_svg = f'<polygon points="{feature["points"]}" fill="{feature["color"]}" />\n' # 生成原始质量的特征SVG字符串。
+        feature_size = feature_sizes[i]['original'] # 获取该特征原始质量的大小。
+        
+        if bytes_used + feature_size <= max_size_bytes: # 如果添加该特征后总大小不超过限制。
+            svg += feature_svg # 添加该特征到SVG内容。
+            bytes_used += feature_size # 更新已用字节数。
+            added_features.add(i) # 将该特征的索引添加到已添加集合中。
+    
+    # 第二遍：尝试以渐进简化的方式添加剩余特征。
+    for level in range(1, 4):  # Try simplification levels 1-3 # 遍历简化级别1到3。
+        for i, feature in enumerate(features): # 再次遍历所有特征。
+            if i in added_features: # 如果该特征已在第一遍中添加。
+                continue # 则跳过。
+                
+            feature_size = feature_sizes[i][f'level{level}'] # 获取当前特征在当前简化级别下的大小。
+            if bytes_used + feature_size <= max_size_bytes: # 如果添加简化后的特征不超过总大小限制。
+                feature_svg = f'<polygon points="{simplify_polygon(feature["points"], level)}" fill="{feature["color"]}" />\n' # 生成简化后的特征SVG字符串。
+                svg += feature_svg # 添加到SVG内容。
+                bytes_used += feature_size # 更新已用字节数。
+                added_features.add(i) # 将该特征索引添加到已添加集合。
+    
+    # 最终确定SVG。
+    svg += svg_footer # 添加SVG尾部。
+    
+    # 再次检查我们没有超出限制。
+    final_size = len(svg.encode('utf-8')) # 计算最终SVG字符串的字节大小。
+    if final_size > max_size_bytes: # 如果最终大小仍然超过了限制（理论上不应发生，除非估算有误或基本SVG结构就很大）。
+        # 如果我们不知何故超出了，则返回基本的SVG。
+        return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}"><rect width="{width}" height="{height}" fill="{bg_hex_color}"/></svg>' # 返回一个仅包含背景的最小SVG。
+    
+    # 返回具有高效空间利用率的SVG。
+    return svg # 返回最终生成的SVG字符串。
